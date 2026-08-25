@@ -1,0 +1,7 @@
+# ระบบต้นแบบ ACL Biomechanics — ต้องใช้ Python 3.12 (MediaPipe ยังไม่รองรับ 3.13 ขึ้นไป)
+streamlit>=1.32
+mediapipe>=0.10.14,<0.11
+opencv-python>=4.9
+numpy
+pandas>=2.0
+pytest>=8.0

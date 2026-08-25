@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# ไฟล์โมเดล MediaPipe ขนาดใหญ่ ดาวน์โหลดใหม่ได้ตามวิธีใน README
+models/*.task
+
+# ผลการวิเคราะห์ที่ส่งออก
+*.csv
+
+# เอกสารต้นฉบับ ไม่นำขึ้น repo
+Source/
+
+# ผลลัพธ์ที่ส่งออกจากการทดสอบ
+TestResult/
+
+# ค่าตั้งเครื่องมือส่วนตัว และ symlink ที่ใช้ไม่ได้นอกเครื่องนี้
+.obsidian/
+.claude/
+.agents/
+{{pkgetc}}/
