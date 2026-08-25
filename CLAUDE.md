@@ -73,6 +73,13 @@ Two design points that are easy to break:
 against a fixed set of reference values that live outside this repo. Never weaken those
 assertions; if one fails, the model drifted rather than the fixture being wrong.
 
+**Never commit anything under `Source/` or `TestResult/`.** `Source/` holds an unpublished
+document and `TestResult/` holds exported runs containing participant data; both are
+gitignored, and the repository is public. This has gone wrong once already — the document
+was pushed publicly, and the only reliable fix was deleting and recreating the repository,
+because a force-push leaves the old blob fetchable by its SHA. Do not add these paths back
+to git, and do not remove them from `.gitignore`.
+
 **Participant fields are metadata only.** Age, gender, weight and height reach the PDF header
 and CSV columns and nothing else. The original broken version of this app passed age and
 gender into the risk function — that was a bug, and the model takes exactly four variables
