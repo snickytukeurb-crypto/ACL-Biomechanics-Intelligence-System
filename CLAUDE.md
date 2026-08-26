@@ -48,10 +48,12 @@ There is no linter or formatter configured.
 **Python 3.12 picked in Advanced settings**; the default is newer and MediaPipe has no
 wheel for it.
 
-**`packages.txt` holds exactly one line, `libgl1`, and adding to it is how the deploy
-breaks.** The image mixes Debian trixie with a bullseye-security repo, so apt cannot solve
-`chromium`, `ffmpeg`, or `libglib2.0-0` (bullseye's `libglib2.0-0` conflicts with the
-`libglib2.0-0t64` trixie needs). Any unsolvable line fails the whole install step and the
+**`packages.txt` holds the two lines OpenCV needs to import — `libgl1` and
+`libglib2.0-0t64` — and adding to it is how the deploy breaks.** The image mixes Debian
+trixie with a bullseye-security repo, so apt cannot solve `chromium` or `ffmpeg`, and the
+glib package must be named by its trixie name: asking for plain `libglib2.0-0` pulls
+bullseye's, which `Breaks` the `libglib2.0-0t64` everything else needs. Both were found the
+same way — read the deploy log, do not guess package names. Any unsolvable line fails the whole install step and the
 app never boots — it is not a per-feature degradation. It is also fed straight to apt-get,
 so it must stay a bare list: no comments, no blank lines. Solve things with Python
 packages instead, the way `imageio-ffmpeg` ships its own ffmpeg binary. The consequence: **the hosted copy cannot
