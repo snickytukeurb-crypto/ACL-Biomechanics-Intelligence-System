@@ -16,6 +16,7 @@ import io
 import math
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,6 +39,11 @@ CHROME_CANDIDATES = (
     "google-chrome",
     "chromium",
 )
+
+# บนเครื่องแม่ข่าย Linux (เช่น Streamlit Cloud) Chromium เปิด sandbox ไม่ได้เพราะ
+# คอนเทนเนอร์ปิด user namespace ไว้ และ /dev/shm เล็กเกินกว่าจะเรนเดอร์หน้าใหญ่ ๆ ได้
+# บน macOS ไม่ต้องใส่ธงพวกนี้ พฤติกรรมเดิมจึงไม่เปลี่ยน
+SERVER_FLAGS = ("--no-sandbox", "--disable-dev-shm-usage") if sys.platform.startswith("linux") else ()
 
 SIDE_LABELS = {"left": "ขาซ้าย", "right": "ขาขวา"}
 
@@ -298,6 +304,7 @@ def render_pdf(page_html: str, timeout: float = 60.0) -> bytes:
                 browser, "--headless", "--disable-gpu", "--no-pdf-header-footer",
                 f"--print-to-pdf={target}",
                 "--virtual-time-budget=8000",
+                *SERVER_FLAGS,
                 source.as_uri(),
             ],
             check=True, capture_output=True, timeout=timeout,

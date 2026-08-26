@@ -42,6 +42,21 @@ There is no linter or formatter configured.
 - Sample footage lives **outside the repo** at `../Video/*.MP4`. `C0006`/`C0007`/`C0009`
   contain real landings; `C0004`/`C0010`/`C0011` have no detectable person.
 
+## Deployment (Streamlit Community Cloud)
+
+`packages.txt` (apt: `libgl1`, `libglib2.0-0`, `ffmpeg`, `chromium`) and
+`.streamlit/config.toml` exist for the hosted copy. `packages.txt` is fed straight to
+apt-get, so it must stay a bare list — no comments, no blank-line tricks. The deploy
+needs **Python 3.12 picked in Advanced settings**; the default is newer and MediaPipe has
+no wheel for it.
+
+Three things differ on a server and are handled in code, not by hand:
+`pose.ensure_model()` downloads the gitignored `.task` file on first use (called from
+`app.py` behind `st.cache_resource`); the webcam option is hidden when no camera exists
+(`WEBCAM_AVAILABLE`, override with `ACL_ENABLE_WEBCAM=1`); and `report.SERVER_FLAGS` adds
+`--no-sandbox --disable-dev-shm-usage` to Chromium on Linux only, so macOS behaviour is
+untouched.
+
 ## Architecture
 
 `app.py` is presentation only — every calculation lives in `acl/`. Keep it that way.

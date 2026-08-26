@@ -7,6 +7,9 @@ MediaPipe Tasks (PoseLandmarker) ซึ่งเป็นทางที่ Goog
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+import urllib.request
 from pathlib import Path
 
 import cv2
@@ -28,6 +31,34 @@ SIDES = tuple(LEG_LANDMARKS)
 
 class ModelNotFound(FileNotFoundError):
     """ยังไม่ได้ดาวน์โหลดไฟล์โมเดลของ MediaPipe"""
+
+
+def ensure_model(model_path=None, timeout: float = 120.0) -> Path:
+    """คืนที่อยู่ไฟล์โมเดล ถ้ายังไม่มีก็ดาวน์โหลดจาก Google ให้ครั้งเดียว
+
+    ไฟล์โมเดลราว 9 MB ไม่ได้อยู่ใน repo (ถูก .gitignore ไว้) เครื่องที่รันจากโค้ดสด
+    เช่น Streamlit Cloud จึงต้องดึงเองตอนเริ่มใช้งานครั้งแรก เขียนลงไฟล์ชั่วคราว
+    ก่อนแล้วค่อยย้ายทับ เพื่อไม่ให้เหลือไฟล์ที่โหลดไม่ครบไว้ให้ MediaPipe อ่าน
+    """
+    path = Path(model_path or DEFAULT_MODEL_PATH)
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(dir=path.parent, suffix=".part", delete=False)
+    staging = Path(handle.name)
+    try:
+        with urllib.request.urlopen(MODEL_URL, timeout=timeout) as response:
+            shutil.copyfileobj(response, handle)
+        handle.close()
+        staging.replace(path)
+    except Exception as error:  # ครอบทุกกรณี: เน็ตล่ม, 404, ดิสก์เต็ม
+        handle.close()
+        staging.unlink(missing_ok=True)
+        raise ModelNotFound(
+            f"ดาวน์โหลดไฟล์โมเดลไม่สำเร็จ ({error})\nดาวน์โหลดเองด้วย:\n"
+            f"  mkdir -p {path.parent} && curl -L -o {path} {MODEL_URL}"
+        ) from error
+    return path
 
 
 def create_pose(

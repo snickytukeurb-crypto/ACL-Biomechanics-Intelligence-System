@@ -1,0 +1,11 @@
+[server]
+# คลิปตัวอย่างของงานนี้ยาวไม่กี่วินาที แต่ไฟล์จากกล้องความละเอียดสูงโตได้ถึงหลักร้อยเมกะไบต์
+maxUploadSize = 400
+
+[theme]
+# หน้าเว็บวาดพื้นหลังเข้มด้วย CSS อยู่แล้ว ตั้ง base ให้ตรงกันกันจอกะพริบเป็นสีขาวตอนโหลด
+base = "dark"
+primaryColor = "#ef4444"
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#1e293b"
+textColor = "#f8fafc"

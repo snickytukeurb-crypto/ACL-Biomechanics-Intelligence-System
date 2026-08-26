@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -29,6 +30,16 @@ MODEL_CONFIDENCE = 0.5  # เกณฑ์ตรวจพบและติดต
 FPS_FALLBACK = 30.0  # ใช้เมื่อไฟล์วิดีโอไม่แจ้งอัตราเฟรมมา
 LEVEL_WINDOW_SECONDS = 0.25  # หามัธยฐานของ R ก่อนแสดงป้าย ลดการกะพริบของระดับ
 LEVEL_HOLD_SECONDS = 2.0  # ค้างระดับสูงสุดไว้ เพราะจังหวะเสี่ยงจริงกินเวลาเพียง ~0.1 วินาที
+
+# เซิร์ฟเวอร์ที่โฮสต์แอป (เช่น Streamlit Community Cloud) ไม่มีกล้องต่ออยู่ ปุ่มเว็บแคม
+# จึงถูกซ่อนไปเลย ดีกว่าปล่อยให้ผู้ใช้กดแล้วเจอ error ตอนเปิดกล้องไม่ได้
+# ตั้ง ACL_ENABLE_WEBCAM=1 เพื่อบังคับเปิดเมื่อรันบน Linux ที่มีกล้องจริง
+if os.environ.get("ACL_ENABLE_WEBCAM"):
+    WEBCAM_AVAILABLE = os.environ["ACL_ENABLE_WEBCAM"] == "1"
+elif sys.platform.startswith("linux"):
+    WEBCAM_AVAILABLE = os.path.exists("/dev/video0")
+else:
+    WEBCAM_AVAILABLE = True
 
 PREVIEW_WIDTH = 720
 # สัดส่วนความกว้าง (วิดีโอ : ตารางตัวเลข) ระหว่างวิเคราะห์
@@ -137,7 +148,11 @@ if not st.session_state.running:
 
     # ------------------------------------------------------------------ แหล่งข้อมูล
     st.subheader("แหล่งข้อมูล")
-    mode = st.radio("เลือกวิธีรับข้อมูล", ["ไฟล์วิดีโอ", "กล้องเว็บแคม"], horizontal=True)
+    if WEBCAM_AVAILABLE:
+        mode = st.radio("เลือกวิธีรับข้อมูล", ["ไฟล์วิดีโอ", "กล้องเว็บแคม"], horizontal=True)
+    else:
+        mode = "ไฟล์วิดีโอ"
+        st.caption("เครื่องที่รันแอปนี้ไม่มีกล้องต่ออยู่ จึงใช้ได้เฉพาะการอัปโหลดคลิป")
 
     uploaded_video = None
     if mode == "ไฟล์วิดีโอ":
@@ -313,6 +328,16 @@ def _new_variant_path() -> str:
     return handle.name
 
 
+@st.cache_resource(show_spinner="กำลังเตรียมไฟล์โมเดลท่าทาง (ครั้งแรกครั้งเดียว)")
+def prepare_model():
+    """ดึงไฟล์โมเดลของ MediaPipe มาเก็บไว้ก่อนเริ่มวิเคราะห์
+
+    เครื่องที่ติดตั้งตาม README มีไฟล์นี้อยู่แล้ว ฟังก์ชันจึงคืนค่าทันที
+    ส่วนเครื่องที่รันจากโค้ดสด (ไฟล์โมเดลไม่ได้อยู่ใน repo) จะโหลดครั้งเดียวแล้วแคชไว้
+    """
+    return pose_module.ensure_model()
+
+
 def analyse(capture, session, panel, use_wall_clock, total_frames, fps, video_path):
     """วนอ่านทีละเฟรม อัปเดต session และบันทึกวิดีโอผลลัพธ์ไปพร้อมกัน
 
@@ -449,6 +474,7 @@ if st.session_state.running:
         # ถ้าย่อตั้งแต่ตอนเขียน จะย้อนกลับไปเอาภาพคมชัดเดิมไม่ได้อีก
         st.session_state.video_path = _new_video_path()
         try:
+            prepare_model()
             analyse(
                 capture, session, build_live_panel(frames_slot),
                 use_wall_clock, total_frames, fps, st.session_state.video_path,
