@@ -44,11 +44,19 @@ There is no linter or formatter configured.
 
 ## Deployment (Streamlit Community Cloud)
 
-`packages.txt` (apt: `libgl1`, `libglib2.0-0`, `ffmpeg`, `chromium`) and
-`.streamlit/config.toml` exist for the hosted copy. `packages.txt` is fed straight to
-apt-get, so it must stay a bare list — no comments, no blank-line tricks. The deploy
-needs **Python 3.12 picked in Advanced settings**; the default is newer and MediaPipe has
-no wheel for it.
+`packages.txt` and `.streamlit/config.toml` exist for the hosted copy. The deploy needs
+**Python 3.12 picked in Advanced settings**; the default is newer and MediaPipe has no
+wheel for it.
+
+**`packages.txt` holds exactly one line, `libgl1`, and adding to it is how the deploy
+breaks.** The image mixes Debian trixie with a bullseye-security repo, so apt cannot solve
+`chromium`, `ffmpeg`, or `libglib2.0-0` (bullseye's `libglib2.0-0` conflicts with the
+`libglib2.0-0t64` trixie needs). Any unsolvable line fails the whole install step and the
+app never boots — it is not a per-feature degradation. It is also fed straight to apt-get,
+so it must stay a bare list: no comments, no blank lines. Solve things with Python
+packages instead, the way `imageio-ffmpeg` ships its own ffmpeg binary. The consequence:
+**PDF export cannot work on the hosted copy** (no Chromium); it degrades to the CSV
+download with a message.
 
 Three things differ on a server and are handled in code, not by hand:
 `pose.ensure_model()` downloads the gitignored `.task` file on first use (called from
@@ -56,6 +64,14 @@ Three things differ on a server and are handled in code, not by hand:
 (`WEBCAM_AVAILABLE`, override with `ACL_ENABLE_WEBCAM=1`); and `report.SERVER_FLAGS` adds
 `--no-sandbox --disable-dev-shm-usage` to Chromium on Linux only, so macOS behaviour is
 untouched.
+
+`video.open_writer` also forks by platform: on Linux it returns `FfmpegWriter`, which pipes
+raw BGR frames into ffmpeg, because the Linux OpenCV wheels ship no H.264 encoder and
+`avc1` either fails outright or writes a file browsers refuse to play. macOS keeps the
+`cv2.VideoWriter` path (VideoToolbox). `find_ffmpeg()` falls back to the `imageio-ffmpeg`
+binary last, so local runs still get Homebrew's ffmpeg — which matters because
+`tests/test_video.py` derives `ffprobe` from that path and the bundled binary has no
+`ffprobe` beside it.
 
 ## Architecture
 

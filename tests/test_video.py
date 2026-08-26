@@ -70,5 +70,7 @@ def test_rescale_forces_even_height(tmp_path):
 
 def test_missing_ffmpeg_reports_clearly(tmp_path, monkeypatch):
     monkeypatch.setattr(video, "FFMPEG_CANDIDATES", ("/nonexistent/ffmpeg",))
+    # ต้องปิดไบนารีสำรองของ imageio-ffmpeg ด้วย ไม่งั้นจะยังหา ffmpeg เจอเสมอ
+    monkeypatch.setattr(video, "bundled_ffmpeg", lambda: None)
     with pytest.raises(video.EncoderNotAvailable):
         video.rescale(tmp_path / "a.mp4", tmp_path / "b.mp4", 320)
