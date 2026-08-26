@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Streamlit tool that scores ACL (anterior cruciate ligament) injury risk from video or
-webcam, using MediaPipe pose landmarks. The scoring model is fixed and externally
+A Streamlit tool that scores ACL (anterior cruciate ligament) injury risk from an
+uploaded clip or the viewer's own browser camera, using MediaPipe pose landmarks. The scoring model is fixed and externally
 specified — the code exists to implement it faithfully, not to redefine it. Treat the
 weights, reference values and band thresholds in `acl/risk.py` as settled.
 
@@ -37,40 +37,58 @@ There is no linter or formatter configured.
   removed upstream; `acl/pose.py` uses `PoseLandmarker` in VIDEO mode, which requires
   monotonically increasing timestamps and a `models/pose_landmarker_full.task` file
   (gitignored, ~9 MB — download command is in `README.md`).
-- **PDF export shells out to headless Google Chrome**; **video export needs `ffmpeg`**
-  (`/opt/homebrew/bin/ffmpeg`). Both degrade with a clear message when missing.
+- **PDF export shells out to headless Google Chrome.** Without it the page offers the
+  report as HTML for the viewer to print instead (see Deployment). **ffmpeg is never
+  missing**: `find_ffmpeg()` prefers a system one (`/opt/homebrew/bin/ffmpeg`) and falls
+  back to the binary `imageio-ffmpeg` ships.
 - Sample footage lives **outside the repo** at `../Video/*.MP4`. `C0006`/`C0007`/`C0009`
   contain real landings; `C0004`/`C0010`/`C0011` have no detectable person.
 
 ## Deployment (Streamlit Community Cloud)
 
-`packages.txt` and `.streamlit/config.toml` exist for the hosted copy. The deploy needs
-**Python 3.12 picked in Advanced settings**; the default is newer and MediaPipe has no
-wheel for it.
+Hosted at `acl-bis.streamlit.app`, tracking `main`. `packages.txt` and
+`.streamlit/config.toml` exist for that copy, and the deploy needs **Python 3.12 picked in
+Advanced settings** — the default is newer and MediaPipe has no wheel for it.
 
-**`packages.txt` holds the two lines OpenCV needs to import — `libgl1` and
-`libglib2.0-0t64` — and adding to it is how the deploy breaks.** The image mixes Debian
-trixie with a bullseye-security repo, so apt cannot solve `chromium` or `ffmpeg`, and the
-glib package must be named by its trixie name: asking for plain `libglib2.0-0` pulls
-bullseye's, which `Breaks` the `libglib2.0-0t64` everything else needs. Both were found the
-same way — read the deploy log, do not guess package names. Any unsolvable line fails the whole install step and the
-app never boots — it is not a per-feature degradation. It is also fed straight to apt-get,
-so it must stay a bare list: no comments, no blank lines. Solve things with Python
-packages instead, the way `imageio-ffmpeg` ships its own ffmpeg binary. The consequence: **the hosted copy cannot
-render PDFs itself** (no Chromium), so the export row swaps the "สร้างรายงาน PDF" button
-for an HTML download whenever `report.find_chrome()` is None — the viewer prints it from
-their own browser. `build_html` carries a `.printbar` button that `@media print` hides, so
-the same HTML serves both routes and the button never reaches the paper.
+**`packages.txt` is the fragile part.** It is fed straight to apt-get, so it must stay a
+bare list (no comments, no blank lines), and a single line apt cannot solve fails the whole
+install step — the app then never boots at all, rather than losing one feature. It holds
+exactly the libraries the imports need:
 
-Two things differ on a server and are handled in code, not by hand:
-`pose.ensure_model()` downloads the gitignored `.task` file on first use (called from
-`app.py` behind `st.cache_resource`); and `report.SERVER_FLAGS` adds
-`--no-sandbox --disable-dev-shm-usage` to Chromium on Linux only, so macOS behaviour is
-untouched. The camera mode itself no longer differs by host: it always captures through the
-*viewer's* browser via `streamlit-webrtc` (`WebRtcMode.SENDRECV`, see `LiveProcessor` in
-`app.py`), never a server-side device, so it works the same on a laptop and on Streamlit
-Community Cloud. It needs HTTPS (or `localhost`) and, on networks with strict NAT, a TURN
-server beyond the public STUN one configured — out of scope here, see `README.md`.
+| line | needed by |
+|---|---|
+| `libgl1`, `libglib2.0-0t64` | `import cv2` — `libGL.so.1`, `libgthread-2.0.so.0` |
+| `libegl1`, `libgles2` | `PoseLandmarker.create_from_options` — `libEGL.so.1`, `libGLESv2.so.2` |
+
+Every one of those was found by reading the deploy log *after* a failure, never by guessing:
+the traceback names the exact `.so`, and
+`curl -s https://packages.debian.org/trixie/amd64/<pkg>/filelist` confirms which package
+ships it. Follow that loop rather than adding hopeful lines. The image mixes Debian trixie
+with a bullseye-security repo, which is why `chromium` and `ffmpeg` cannot be solved at all,
+and why glib must be asked for by its trixie name — plain `libglib2.0-0` pulls bullseye's,
+which `Breaks` the `libglib2.0-0t64` everything else needs. Given a choice, solve it with a
+Python package instead: `imageio-ffmpeg` ships its own ffmpeg and needs no apt line.
+
+Consequences, all handled in code rather than by hand:
+
+- **No Chromium means the hosted copy cannot render PDFs.** The export row swaps the
+  "สร้างรายงาน PDF" button for an HTML download whenever `report.find_chrome()` is None, and
+  the viewer prints it from their own browser. `build_html` carries a `.printbar` button that
+  `@media print` hides, so one HTML serves both routes and the button never reaches paper.
+- **The `.task` model file is not in git.** `pose.ensure_model()` downloads it on first use,
+  called from `app.py` behind `st.cache_resource`.
+- `report.SERVER_FLAGS` adds `--no-sandbox --disable-dev-shm-usage` to Chromium on Linux
+  only, so macOS behaviour is untouched.
+- The camera mode does **not** differ by host: it always captures through the *viewer's*
+  browser via `streamlit-webrtc` (`WebRtcMode.SENDRECV`, `LiveProcessor` in `app.py`), never
+  a server-side device. It needs HTTPS (or `localhost`) and, on strict-NAT networks, a TURN
+  server beyond the public STUN one configured — out of scope, see `README.md`.
+
+The free tier has roughly 1 GB of memory, which this pipeline used to exceed. Uploads are
+streamed to a temp file instead of held in `st.session_state`, frames are downscaled to
+`PROCESS_MAX_WIDTH` before MediaPipe, and the per-frame table renders through
+`column_config` rather than a pandas `Styler` — together those took peak RSS on
+`C0006.MP4` from 1.11 GB to 424 MB. Keep new work inside that budget.
 
 `video.open_writer` uses `FfmpegWriter` on every platform now, piping raw BGR frames into
 `libx264` with a fixed CRF (`VIDEO_CRF` in `app.py`, currently 28) and
@@ -153,7 +171,16 @@ letters and Thai render as boxes. Thai is fine everywhere else (Streamlit, PDF v
 **Tuning constants live in a `ตั้งค่าหลังบ้าน` block at the top of `app.py`**, deliberately not
 exposed in the UI so every test runs under identical conditions. `LIVE_LAYOUT_RATIO` and
 `RESULT_VIDEO_WIDTH` control layout sizing; note that the on-screen "ขนาดวิดีโอ" control sets
-the encoded file resolution, which is a different thing from player size.
+the encoded file resolution, which is a different thing from player size. `LIVE_FPS` is the
+frame rate asked of the browser camera and the nominal `Session` fps — real time always comes
+from measured `dt`. `VIDEO_CRF` sets output compression, `PROCESS_MAX_WIDTH` the downscale
+before MediaPipe (0 disables it).
+
+**`PROCESS_MAX_WIDTH` is the one tuning constant that can move the numbers**, so it was
+validated rather than assumed: running `../Video/C0006.MP4` at full 1920px versus 1280px
+gives the same critical frame (74) and R 50.16 vs 50.25. Re-run that comparison — same
+critical frame, |ΔR| ≤ 1.0 — before changing it, driving `pose`/`Session` directly instead of
+going through the page.
 
 **Streamlit:** a `developing-with-streamlit` skill is installed under `.claude/skills/` —
 invoke it for UI work. `use_container_width` is deprecated; use `width="stretch"`.
