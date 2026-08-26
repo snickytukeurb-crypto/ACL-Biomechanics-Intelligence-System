@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import tempfile
 import time
 
+import av
 import cv2
 import streamlit as st
+from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
 
 from acl import pose as pose_module
 from acl import report
@@ -30,16 +31,10 @@ MODEL_CONFIDENCE = 0.5  # เกณฑ์ตรวจพบและติดต
 FPS_FALLBACK = 30.0  # ใช้เมื่อไฟล์วิดีโอไม่แจ้งอัตราเฟรมมา
 LEVEL_WINDOW_SECONDS = 0.25  # หามัธยฐานของ R ก่อนแสดงป้าย ลดการกะพริบของระดับ
 LEVEL_HOLD_SECONDS = 2.0  # ค้างระดับสูงสุดไว้ เพราะจังหวะเสี่ยงจริงกินเวลาเพียง ~0.1 วินาที
-
-# เซิร์ฟเวอร์ที่โฮสต์แอป (เช่น Streamlit Community Cloud) ไม่มีกล้องต่ออยู่ ปุ่มเว็บแคม
-# จึงถูกซ่อนไปเลย ดีกว่าปล่อยให้ผู้ใช้กดแล้วเจอ error ตอนเปิดกล้องไม่ได้
-# ตั้ง ACL_ENABLE_WEBCAM=1 เพื่อบังคับเปิดเมื่อรันบน Linux ที่มีกล้องจริง
-if os.environ.get("ACL_ENABLE_WEBCAM"):
-    WEBCAM_AVAILABLE = os.environ["ACL_ENABLE_WEBCAM"] == "1"
-elif sys.platform.startswith("linux"):
-    WEBCAM_AVAILABLE = os.path.exists("/dev/video0")
-else:
-    WEBCAM_AVAILABLE = True
+LIVE_FPS = 15.0  # อัตราเฟรมที่ขอจากกล้องผ่านเบราว์เซอร์ (media_stream_constraints ด้านล่าง)
+# ใช้เป็นค่า fps เชิงระบุของ Session เท่านั้น เวลาจริงมาจาก dt ที่วัดจากนาฬิกาเสมอ
+VIDEO_CRF = 28  # ยิ่งมากไฟล์ยิ่งเล็ก ยังอ่านตัวเลขบนภาพออกสบายที่ค่านี้ (ค่าเริ่มต้นของ libx264 คือ 23)
+PROCESS_MAX_WIDTH = 1280  # ย่อเฟรมก่อนเข้า MediaPipe ถ้ากว้างกว่านี้ ตั้งเป็น 0 = ปิดการย่อ
 
 PREVIEW_WIDTH = 720
 # สัดส่วนความกว้าง (วิดีโอ : ตารางตัวเลข) ระหว่างวิเคราะห์
@@ -96,12 +91,12 @@ st.session_state.setdefault("report_pdf", None)
 st.session_state.setdefault("report_html", None)
 st.session_state.setdefault("source_label", "")
 st.session_state.setdefault("participant", None)
-# เก็บแหล่งข้อมูลไว้ตอนกดเริ่ม เพราะวิดเจ็ตเลือกไฟล์/โหมดจะถูกซ่อนระหว่างวิเคราะห์ (ดูจุดกดเริ่มด้านล่าง)
-st.session_state.setdefault("mode", None)
-st.session_state.setdefault("upload_name", None)
-st.session_state.setdefault("upload_bytes", None)
+# เก็บ path ไฟล์ที่เขียนไว้แล้วตอนกดเริ่ม (ดูจุดกดเริ่มด้านล่าง) แทนการอมไฟล์ทั้งก้อนไว้ในแรม
+st.session_state.setdefault("upload_path", None)
 st.session_state.setdefault("video_path", None)
 st.session_state.setdefault("video_variants", {})
+# ตัวประมวลผลของสตรีมกล้องผ่านเบราว์เซอร์ที่ยังไม่ได้เก็บเกี่ยวผล (ดูหัวข้อกล้องผ่านเบราว์เซอร์)
+st.session_state.setdefault("live_processor", None)
 
 # ---------------------------------------------------------------- แถบข้าง
 # วางไว้นอกเงื่อนไข running เพราะเป็นแผงอ้างอิงที่ไม่กินพื้นที่แนวตั้งของเนื้อหาหลัก
@@ -111,75 +106,6 @@ st.sidebar.markdown(
     "- **Low** — R < 25\n- **Moderate** — 25 ≤ R < 50\n- **High** — R ≥ 50\n\n"
     f"ค่าอ้างอิงปรับสเกล: γ {VALGUS_REF:.0f}°, ω {OMEGA_REF:.0f}°/s, α {ALPHA_REF:.0f}°/s²"
 )
-
-if not st.session_state.running:
-    st.title("ACL Biomechanics Intelligence System")
-    st.caption(
-        "ประเมินความเสี่ยงการบาดเจ็บเอ็นไขว้หน้าหัวเข่าแบบเวลาจริง "
-        "จากมุมข้อเข่า Knee Valgus ความเร็วเชิงมุม และความเร่งเชิงมุม"
-    )
-
-    # ------------------------------------------------------ ประตูข้อมูลผู้ทดสอบ
-    # ต้องกรอกก่อนใช้งานหน้าจอส่วนอื่น เพื่อให้ทุกคลิปที่บันทึกผลมีเจ้าของ
-    # ค่าทั้งสี่เป็นข้อมูลอ้างอิงในรายงาน/CSV เท่านั้น ห้ามไหลเข้าสูตรคำนวณความเสี่ยงเด็ดขาด
-    if st.session_state.participant is None:
-        with st.form("participant_form"):
-            st.subheader("ข้อมูลผู้ทดสอบ")
-            age = st.number_input("อายุ (ปี)", min_value=10, max_value=100, value=17, step=1)
-            gender = st.selectbox("เพศ", ["ชาย", "หญิง"])
-            weight_kg = st.number_input(
-                "น้ำหนัก (กก.)", min_value=20.0, max_value=200.0, value=60.0, step=0.5
-            )
-            height_cm = st.number_input(
-                "ส่วนสูง (ซม.)", min_value=100.0, max_value=250.0, value=170.0, step=0.5
-            )
-            submitted = st.form_submit_button("เริ่มใช้งาน")
-        if submitted:
-            st.session_state.participant = report.Participant(
-                age=age, gender=gender, weight_kg=weight_kg, height_cm=height_cm
-            )
-            st.rerun()
-        st.stop()
-
-    chip_column, edit_column = st.columns([5, 1])
-    chip_column.markdown(f":material/person: **ผู้ทดสอบ:** {st.session_state.participant.label}")
-    if edit_column.button("แก้ไขข้อมูลผู้ทดสอบ"):
-        st.session_state.participant = None
-        st.rerun()
-
-    # ------------------------------------------------------------------ แหล่งข้อมูล
-    st.subheader("แหล่งข้อมูล")
-    if WEBCAM_AVAILABLE:
-        mode = st.radio("เลือกวิธีรับข้อมูล", ["ไฟล์วิดีโอ", "กล้องเว็บแคม"], horizontal=True)
-    else:
-        mode = "ไฟล์วิดีโอ"
-        st.caption("เครื่องที่รันแอปนี้ไม่มีกล้องต่ออยู่ จึงใช้ได้เฉพาะการอัปโหลดคลิป")
-
-    uploaded_video = None
-    if mode == "ไฟล์วิดีโอ":
-        uploaded_video = st.file_uploader(
-            "อัปโหลดคลิป", type=["mp4", "avi", "mov", "mkv", "m4v"]
-        )
-
-    start_column, _ = st.columns([1, 5])
-    if start_column.button("เริ่มวิเคราะห์", type="primary"):
-        st.session_state.running = True
-        st.session_state.session = None
-        st.session_state.critical_image = None
-        st.session_state.report_pdf = None
-        st.session_state.report_html = None
-        st.session_state.source_label = (
-            uploaded_video.name if uploaded_video is not None else "กล้องเว็บแคม"
-        )
-        # จับค่าของวิดเจ็ตไว้ใน session_state เพราะบล็อกด้านล่างนี้จะถูกซ่อนระหว่างวิเคราะห์
-        # (ต้องใช้ getvalue() ไม่ใช่ read() เพราะ read() คืนค่าว่างในรอบที่สอง
-        # เมื่อตัวชี้ของบัฟเฟอร์อยู่ท้ายไฟล์แล้ว)
-        st.session_state.mode = mode
-        st.session_state.upload_name = uploaded_video.name if uploaded_video is not None else None
-        st.session_state.upload_bytes = (
-            uploaded_video.getvalue() if uploaded_video is not None else None
-        )
-        st.rerun()
 
 
 def draw_risk_banner(frame, risk: float, level: str) -> None:
@@ -250,6 +176,9 @@ def build_live_panel(frames_slot):
     ก่อนหน้านี้ทุกอย่างเรียงต่อกันแนวตั้ง (วิดีโอ แล้วค่อยตัวเลข) ซึ่งเกินความสูงจอ
     จอเดียวจึงดูวิดีโอกับตัวเลขพร้อมกันไม่ได้ ที่นี่ frames_slot มาจาก header
     แถบบนสุด (ดูจุดกดปุ่มหยุด) เพราะจำนวนเฟรมย้ายไปอยู่ที่นั่นแทนที่จะอยู่ใต้วิดีโอ
+
+    ใช้เฉพาะโหมดอัปโหลดคลิป (analyse) เท่านั้น — โหมดกล้องผ่านเบราว์เซอร์วาดค่าซ้อนลง
+    บนภาพที่ส่งกลับให้เบราว์เซอร์เองแทน (ดู LiveProcessor.recv) ไม่ผ่านช่องนี้
     """
     video_column, metrics_column = st.columns(list(LIVE_LAYOUT_RATIO))
     frame_slot = video_column.empty()
@@ -340,6 +269,124 @@ def prepare_model():
     return pose_module.ensure_model()
 
 
+def _resize_for_processing(frame):
+    """ย่อเฟรมก่อนเข้า MediaPipe ถ้ากว้างเกิน PROCESS_MAX_WIDTH
+
+    world landmark ที่ใช้คำนวณเป็นหน่วยเมตร ไม่ใช่พิกเซล (ดู acl/pose.py) และ MediaPipe
+    ย่อภาพลงเป็นขนาดของตัวเองก่อนตรวจจับอยู่แล้ว การย่อภาพต้นทางก่อนจึงแทบไม่กระทบผล
+    (พิสูจน์แล้วด้วยคลิปตัวอย่าง — ดูหัวข้อการตรวจในแผน) วิดีโอผลลัพธ์เขียนที่ขนาดย่อนี้
+    ไปเลย ทำให้เข้ารหัสเร็วขึ้นและไฟล์เล็กลงอีกชั้นหนึ่ง
+    """
+    if PROCESS_MAX_WIDTH <= 0:
+        return frame
+    height, width = frame.shape[:2]
+    if width <= PROCESS_MAX_WIDTH:
+        return frame
+    scale = PROCESS_MAX_WIDTH / width
+    size = (PROCESS_MAX_WIDTH, max(1, int(round(height * scale))))
+    return cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+
+
+def process_frame(detector, session, stabiliser, frame, frame_index, timestamp_ms, dt):
+    """ตรวจท่าทาง อัปเดต session และวาดผลลงบน frame (แก้ในตัว)
+
+    ใช้ร่วมกันทั้งโหมดอัปโหลดคลิป (analyse) และโหมดกล้องผ่านเบราว์เซอร์ (LiveProcessor)
+    เพื่อให้ผลการคำนวณและภาพซ้อนตรงกันทุกประการไม่ว่าจะมาจากแหล่งไหน
+    คืน (record, display_risk, display_level) — สองค่าหลังเป็น None เมื่อไม่เห็นขาทั้งคู่
+    """
+    results = pose_module.detect(detector, frame, timestamp_ms)
+    legs = {
+        side: pose_module.world_leg(results, side, MIN_VISIBILITY)
+        for side in pose_module.SIDES
+    }
+    record = session.update(frame_index, legs["left"], legs["right"], dt)
+
+    height, width = frame.shape[:2]
+    for side in pose_module.SIDES:
+        if legs[side] is None:
+            continue
+        pixels = pose_module.pixel_leg(results, side, width, height)
+        if pixels is not None:
+            pose_module.draw_leg(frame, pixels, LEG_COLORS[side])
+
+    display_risk = display_level = None
+    if record is not None:
+        display_risk, display_level = stabiliser.update(record.risk, timestamp_ms / 1000.0)
+        draw_risk_banner(frame, display_risk, display_level)
+        draw_metric_strip(frame, record)
+
+    return record, display_risk, display_level
+
+
+class LiveProcessor(VideoProcessorBase):
+    """รับเฟรมจากกล้องของผู้ใช้ผ่าน WebRTC
+
+    streamlit-webrtc สร้างและเรียกอินสแตนซ์นี้บนเธรดของตัวเอง (คนละเธรดกับสคริปต์
+    Streamlit หลัก) ทั้ง __init__, recv() และ on_ended() จึงห้ามเรียก st.* เด็ดขาด
+    ค่าที่หน้าเว็บต้องใช้ระหว่างเล่นจะวาดลงบนภาพที่ recv() คืนกลับไปแทน ส่วนผลสรุปทั้งชุด
+    (session / critical_image / video_path) ฝั่งสคริปต์หลักจะอ่านจากอินสแตนซ์นี้เอง
+    หลังผู้ใช้กด STOP เท่านั้น (ดูจุดเรียก webrtc_streamer ในบล็อกแหล่งข้อมูล)
+    """
+
+    def __init__(self):
+        self.session = Session(fps=LIVE_FPS, smoothing_window=SMOOTHING_WINDOW)
+        self.detector = pose_module.create_pose(
+            min_detection_confidence=MODEL_CONFIDENCE,
+            min_tracking_confidence=MODEL_CONFIDENCE,
+        )
+        self.stabiliser = LevelStabiliser(LEVEL_WINDOW_SECONDS, LEVEL_HOLD_SECONDS)
+        self.writer = None
+        self.critical_image = None
+        self.lowest_theta = float("inf")
+        self.frame_index = 0
+        # ไฟล์ชั่วคราวล้วน ๆ ไม่แตะ st.session_state เพราะออบเจกต์นี้ถูกสร้างคนละเธรด
+        self.video_path = _new_variant_path()
+        self._started = time.perf_counter()
+        self._previous_time = self._started
+        self._closed = False
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        image = frame.to_ndarray(format="bgr24")
+        image = _resize_for_processing(image)
+
+        # เวลาจริงจากนาฬิกาเสมอ ไม่ใช่ index/fps เพราะอัตราเฟรมของกล้องไม่คงที่
+        # (Session.update สะสมเวลาจาก dt เอง ดู CLAUDE.md เรื่องเวลาของโหมดกล้องสด)
+        now = time.perf_counter()
+        timestamp_ms = (now - self._started) * 1000.0
+        dt = max(now - self._previous_time, 1e-3)
+        self._previous_time = now
+
+        record, _display_risk, _display_level = process_frame(
+            self.detector, self.session, self.stabiliser,
+            image, self.frame_index, timestamp_ms, dt,
+        )
+
+        height, width = image.shape[:2]
+        if self.writer is None:
+            self.writer = video.open_writer(self.video_path, LIVE_FPS, (width, height), VIDEO_CRF)
+        self.writer.write(image)
+
+        if record is not None and record.min_theta < self.lowest_theta:
+            self.lowest_theta = record.min_theta
+            self.critical_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        self.frame_index += 1
+        return av.VideoFrame.from_ndarray(image, format="bgr24")
+
+    def on_ended(self):
+        """streamlit-webrtc เรียกให้ตอนสตรีมจบ (กด STOP / ปิดหน้า / เน็ตหลุด)
+
+        เรียกครั้งเดียวตามปกติ แต่กันไว้สองชั้นด้วย _closed เผื่อกรณีขอบ ๆ ที่เรียกซ้ำ
+        เพราะ writer.release() เรียกซ้ำสองครั้งจะพังได้
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self.writer is not None:
+            self.writer.release()
+        self.detector.close()
+
+
 def analyse(capture, session, panel, use_wall_clock, total_frames, fps, video_path):
     """วนอ่านทีละเฟรม อัปเดต session และบันทึกวิดีโอผลลัพธ์ไปพร้อมกัน
 
@@ -363,6 +410,7 @@ def analyse(capture, session, panel, use_wall_clock, total_frames, fps, video_pa
             ok, frame = capture.read()
             if not ok:
                 break
+            frame = _resize_for_processing(frame)
 
             # โหมด VIDEO ของ MediaPipe บังคับให้เวลาประทับเพิ่มขึ้นทุกเฟรม
             # คลิปใช้เวลาตามอัตราเฟรม ส่วนกล้องสดใช้เวลาจริงที่ผ่านไป
@@ -370,42 +418,24 @@ def analyse(capture, session, panel, use_wall_clock, total_frames, fps, video_pa
             timestamp_ms = (
                 (now - started) * 1000.0 if use_wall_clock else frame_index / fps * 1000.0
             )
-            results = pose_module.detect(detector, frame, timestamp_ms)
-
             dt = None
             if use_wall_clock:
                 dt = max(now - previous_time, 1e-3)
                 previous_time = now
 
-            legs = {
-                side: pose_module.world_leg(results, side, MIN_VISIBILITY)
-                for side in pose_module.SIDES
-            }
-            record = session.update(frame_index, legs["left"], legs["right"], dt)
+            record, display_risk, display_level = process_frame(
+                detector, session, stabiliser, frame, frame_index, timestamp_ms, dt
+            )
 
             height, width = frame.shape[:2]
-            for side in pose_module.SIDES:
-                if legs[side] is None:
-                    continue
-                pixels = pose_module.pixel_leg(results, side, width, height)
-                if pixels is not None:
-                    pose_module.draw_leg(frame, pixels, LEG_COLORS[side])
-
-            if record is not None:
-                analysed += 1
-                display_risk, display_level = stabiliser.update(
-                    record.risk, timestamp_ms / 1000.0
-                )
-                draw_risk_banner(frame, display_risk, display_level)
-                draw_metric_strip(frame, record)
-
-            # เปิดตัวเขียนวิดีโอเมื่อรู้ขนาดเฟรมจริงแล้ว คือหลังอ่านเฟรมแรกได้
+            # เปิดตัวเขียนวิดีโอเมื่อรู้ขนาดเฟรมจริงแล้ว คือหลังอ่านเฟรมแรกได้ (และย่อแล้วถ้าเปิดใช้)
             if writer is None:
-                writer = video.open_writer(video_path, fps, (width, height))
+                writer = video.open_writer(video_path, fps, (width, height), VIDEO_CRF)
             writer.write(frame)
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             if record is not None:
+                analysed += 1
                 if record.min_theta < lowest_theta:
                     lowest_theta = record.min_theta
                     st.session_state.critical_image = rgb
@@ -422,6 +452,115 @@ def analyse(capture, session, panel, use_wall_clock, total_frames, fps, video_pa
             writer.release()
 
 
+if not st.session_state.running:
+    st.title("ACL Biomechanics Intelligence System")
+    st.caption(
+        "ประเมินความเสี่ยงการบาดเจ็บเอ็นไขว้หน้าหัวเข่าแบบเวลาจริง "
+        "จากมุมข้อเข่า Knee Valgus ความเร็วเชิงมุม และความเร่งเชิงมุม"
+    )
+
+    # ------------------------------------------------------ ประตูข้อมูลผู้ทดสอบ
+    # ต้องกรอกก่อนใช้งานหน้าจอส่วนอื่น เพื่อให้ทุกคลิปที่บันทึกผลมีเจ้าของ
+    # ค่าทั้งสี่เป็นข้อมูลอ้างอิงในรายงาน/CSV เท่านั้น ห้ามไหลเข้าสูตรคำนวณความเสี่ยงเด็ดขาด
+    if st.session_state.participant is None:
+        with st.form("participant_form"):
+            st.subheader("ข้อมูลผู้ทดสอบ")
+            age = st.number_input("อายุ (ปี)", min_value=10, max_value=100, value=17, step=1)
+            gender = st.selectbox("เพศ", ["ชาย", "หญิง"])
+            weight_kg = st.number_input(
+                "น้ำหนัก (กก.)", min_value=20.0, max_value=200.0, value=60.0, step=0.5
+            )
+            height_cm = st.number_input(
+                "ส่วนสูง (ซม.)", min_value=100.0, max_value=250.0, value=170.0, step=0.5
+            )
+            submitted = st.form_submit_button("เริ่มใช้งาน")
+        if submitted:
+            st.session_state.participant = report.Participant(
+                age=age, gender=gender, weight_kg=weight_kg, height_cm=height_cm
+            )
+            st.rerun()
+        st.stop()
+
+    chip_column, edit_column = st.columns([5, 1])
+    chip_column.markdown(f":material/person: **ผู้ทดสอบ:** {st.session_state.participant.label}")
+    if edit_column.button("แก้ไขข้อมูลผู้ทดสอบ"):
+        st.session_state.participant = None
+        st.rerun()
+
+    # ------------------------------------------------------------------ แหล่งข้อมูล
+    st.subheader("แหล่งข้อมูล")
+    mode = st.radio(
+        "เลือกวิธีรับข้อมูล", ["ไฟล์วิดีโอ", "กล้องผ่านเบราว์เซอร์"], horizontal=True
+    )
+
+    if mode == "ไฟล์วิดีโอ":
+        uploaded_video = st.file_uploader(
+            "อัปโหลดคลิป", type=["mp4", "avi", "mov", "mkv", "m4v"]
+        )
+
+        start_column, _ = st.columns([1, 5])
+        if start_column.button("เริ่มวิเคราะห์", type="primary"):
+            if uploaded_video is None:
+                st.warning("กรุณาอัปโหลดคลิปก่อนเริ่มวิเคราะห์")
+            else:
+                st.session_state.running = True
+                st.session_state.session = None
+                st.session_state.critical_image = None
+                st.session_state.report_pdf = None
+                st.session_state.report_html = None
+                st.session_state.source_label = uploaded_video.name
+                # เขียนลงไฟล์ชั่วคราวทันทีแล้วเก็บแค่ path ไว้ใน session_state แทนการอม
+                # ไฟล์ทั้งก้อนไว้ในแรมตลอดอายุ session (คลิป 4K หลายร้อย MB กินแรมทันที
+                # บนเครื่องคลาวด์ที่มีราว 1 GB) ต้องใช้ getvalue() ไม่ใช่ read() เพราะ
+                # read() คืนค่าว่างถ้าตัวชี้ของบัฟเฟอร์เคยถูกอ่านไปจนสุดไฟล์มาก่อน
+                suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+                    handle.write(uploaded_video.getvalue())
+                    st.session_state.upload_path = handle.name
+                st.rerun()
+    else:
+        st.caption(
+            "กล้องทำงานในเบราว์เซอร์ของคุณเอง ไม่ใช่เครื่องแม่ข่าย — กด START แล้วอนุญาต"
+            "ให้เว็บไซต์ใช้กล้อง เห็นโครงขาและตัวเลขซ้อนบนภาพได้ทันที กด STOP เมื่อเสร็จ"
+        )
+        prepare_model()
+        try:
+            ctx = webrtc_streamer(
+                key="acl-live",
+                mode=WebRtcMode.SENDRECV,
+                video_processor_factory=LiveProcessor,
+                media_stream_constraints={
+                    "video": {"width": {"ideal": 960}, "frameRate": {"ideal": LIVE_FPS}},
+                    "audio": False,
+                },
+                rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+                async_processing=True,
+            )
+        except AttributeError:
+            # streamlit-webrtc ต้องพึ่งตัวจัดการ session ของ Streamlit Runtime จริง ซึ่งไม่มีให้
+            # ตอนรันแบบ raw (python app.py) หรือใต้ streamlit.testing.v1.AppTest จึงจับไว้เฉย ๆ
+            # ผู้ใช้จริงไม่มีทางเจอข้อความนี้ เพราะ `streamlit run app.py` มี session จริงเสมอ
+            st.info("โหมดกล้องผ่านเบราว์เซอร์ใช้ได้เฉพาะตอนรันผ่าน `streamlit run app.py` เท่านั้น")
+            ctx = None
+
+        # ctx.video_processor มีค่าเฉพาะตอนสตรีมกำลังเล่น (สร้างขึ้นคนละเธรดตอนกด START)
+        # จึงต้องเก็บ reference ไว้ทุกรอบสคริปต์รีรันระหว่างเล่น แล้วค่อยเก็บเกี่ยวผลตอน
+        # ค่ากลับเป็น None (เพิ่งหยุด) — ต้องเก็บ session ไว้ก่อนจบสคริปต์รอบนี้เสมอ กฎเดียว
+        # กับที่ CLAUDE.md เตือนไว้เรื่องโหมดอัปโหลดคลิป มิฉะนั้นผลของกล้องสดจะหายไปเงียบ ๆ
+        if ctx is not None and ctx.video_processor is not None:
+            st.session_state.live_processor = ctx.video_processor
+        elif st.session_state.live_processor is not None:  # เพิ่งหยุด
+            live = st.session_state.pop("live_processor")
+            _discard_videos()
+            st.session_state.session = live.session
+            st.session_state.critical_image = live.critical_image
+            st.session_state.video_path = live.video_path
+            st.session_state.source_label = "กล้องผ่านเบราว์เซอร์"
+            st.session_state.report_pdf = None
+            st.session_state.report_html = None
+            st.rerun()
+
+
 if st.session_state.running:
     # แถบหัวแบบย่อ: ชิปผู้ทดสอบ + จำนวนเฟรมทางซ้าย ปุ่มหยุดทางขวา แทนที่หัวข้อ/คำอธิบาย/
     # แหล่งข้อมูล/ปุ่มเริ่ม ที่ถูกซ่อนไป ให้เนื้อหาหลักเหลือพื้นที่พอสำหรับวิดีโอกับตัวเลข
@@ -436,37 +575,23 @@ if st.session_state.running:
         st.rerun()
 
     capture = None
-    temporary_path = None
     try:
-        # อ่านจาก session_state ไม่ใช่วิดเจ็ต mode/uploaded_video ตรง ๆ เพราะวิดเจ็ตเหล่านั้น
-        # อยู่ในบล็อก "if not running" ซึ่งถูกซ่อนระหว่างวิเคราะห์ จึงไม่มีตัวแปรให้อ่านในรอบนี้
-        run_mode = st.session_state.mode
-        if run_mode == "กล้องเว็บแคม":
-            capture = cv2.VideoCapture(0)
-            use_wall_clock = True
-            total_frames = 0
-        else:
-            if st.session_state.upload_bytes is None:
-                st.warning("กรุณาอัปโหลดคลิปก่อนเริ่มวิเคราะห์")
-                st.session_state.running = False
-                st.stop()
-            suffix = os.path.splitext(st.session_state.upload_name or "")[1] or ".mp4"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-                handle.write(st.session_state.upload_bytes)
-                temporary_path = handle.name
-            capture = cv2.VideoCapture(temporary_path)
-            use_wall_clock = False
-            total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-
-        if not capture.isOpened():
-            st.error(
-                "เปิดกล้องไม่ได้ กรุณาตรวจสอบสิทธิ์การเข้าถึงกล้องใน System Settings"
-                if run_mode == "กล้องเว็บแคม"
-                else "อ่านไฟล์วิดีโอนี้ไม่ได้ ลองแปลงเป็น .mp4 (H.264) แล้วอัปโหลดใหม่"
-            )
+        # อ่านจาก session_state ไม่ใช่วิดเจ็ตตรง ๆ เพราะวิดเจ็ตเหล่านั้นอยู่ในบล็อก
+        # "if not running" ซึ่งถูกซ่อนระหว่างวิเคราะห์ จึงไม่มีตัวแปรให้อ่านในรอบนี้
+        # (โหมดกล้องผ่านเบราว์เซอร์ไม่ผ่านบล็อกนี้เลย ดูหัวข้อแหล่งข้อมูลด้านบน)
+        upload_path = st.session_state.upload_path
+        if not upload_path or not os.path.exists(upload_path):
+            st.warning("กรุณาอัปโหลดคลิปก่อนเริ่มวิเคราะห์")
             st.session_state.running = False
             st.stop()
 
+        capture = cv2.VideoCapture(upload_path)
+        if not capture.isOpened():
+            st.error("อ่านไฟล์วิดีโอนี้ไม่ได้ ลองแปลงเป็น .mp4 (H.264) แล้วอัปโหลดใหม่")
+            st.session_state.running = False
+            st.stop()
+
+        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         fps = capture.get(cv2.CAP_PROP_FPS) or FPS_FALLBACK
         session = Session(fps=fps, smoothing_window=SMOOTHING_WINDOW)
         # เก็บไว้ก่อนวิเคราะห์ เพราะ Session ถูกแก้ไขในตัว (append ทีละเฟรม)
@@ -479,7 +604,7 @@ if st.session_state.running:
             prepare_model()
             analyse(
                 capture, session, build_live_panel(frames_slot),
-                use_wall_clock, total_frames, fps, st.session_state.video_path,
+                False, total_frames, fps, st.session_state.video_path,
             )
         except pose_module.ModelNotFound as error:
             st.error(str(error))
@@ -495,8 +620,9 @@ if st.session_state.running:
     finally:
         if capture is not None:
             capture.release()
-        if temporary_path and os.path.exists(temporary_path):
-            os.unlink(temporary_path)
+        if st.session_state.upload_path and os.path.exists(st.session_state.upload_path):
+            os.unlink(st.session_state.upload_path)
+        st.session_state.upload_path = None
 
 # ---------------------------------------------------------------- ผลลัพธ์
 session = st.session_state.session
@@ -611,13 +737,19 @@ if session is not None and session.records:
     # ตารางรายเฟรมครบทุกแถว คู่กับวิดีโอด้านบน ใช้ค้นหาเฟรมที่สนใจแล้วเทียบตัวเลขได้ละเอียด
     st.markdown("**ค่าทุกตัวแปรรายเฟรม**")
     all_frames = session.to_dataframe()
-    # จัดรูปเฉพาะคอลัมน์ทศนิยม คอลัมน์ข้อความอย่าง level และ worst_side จัดรูปแบบตัวเลขไม่ได้
-    # ส่วน frame_index เป็นจำนวนเต็ม ปล่อยไว้ตามเดิมอ่านง่ายกว่าเติม .0
+    # จัดรูปฝั่งเบราว์เซอร์ด้วย column_config แทน DataFrame.style.format ซึ่งสร้างสำเนาตาราง
+    # ที่จัดรูปเป็นสตริงแล้วทุกเซลล์ใหม่ทุกครั้งที่หน้าเว็บรีรัน (กดปุ่มอะไรก็โดน) คลิปยาว
+    # หลายพันเฟรมคือหลายสิบ MB ต่อการกดหนึ่งครั้ง จัดรูปเฉพาะคอลัมน์ทศนิยมเท่านั้น
+    # คอลัมน์ข้อความอย่าง level และ worst_side จัดรูปแบบตัวเลขไม่ได้ ส่วน frame_index
+    # เป็นจำนวนเต็ม ปล่อยไว้ตามเดิมอ่านง่ายกว่าเติม .0
     decimals = all_frames.select_dtypes("float").columns
     st.dataframe(
-        all_frames.style.format({name: "{:.1f}" for name in decimals}, na_rep="—"),
+        all_frames,
         width="stretch",
         height=320,
+        column_config={
+            name: st.column_config.NumberColumn(format="%.1f") for name in decimals
+        },
     )
 
     # ปุ่ม PDF โผล่เฉพาะเครื่องที่มี Chrome ให้เรียก บนเครื่องที่ไม่มี (เช่นตอนขึ้นเว็บ)
