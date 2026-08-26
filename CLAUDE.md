@@ -54,9 +54,11 @@ breaks.** The image mixes Debian trixie with a bullseye-security repo, so apt ca
 `libglib2.0-0t64` trixie needs). Any unsolvable line fails the whole install step and the
 app never boots — it is not a per-feature degradation. It is also fed straight to apt-get,
 so it must stay a bare list: no comments, no blank lines. Solve things with Python
-packages instead, the way `imageio-ffmpeg` ships its own ffmpeg binary. The consequence:
-**PDF export cannot work on the hosted copy** (no Chromium); it degrades to the CSV
-download with a message.
+packages instead, the way `imageio-ffmpeg` ships its own ffmpeg binary. The consequence: **the hosted copy cannot
+render PDFs itself** (no Chromium), so the export row swaps the "สร้างรายงาน PDF" button
+for an HTML download whenever `report.find_chrome()` is None — the viewer prints it from
+their own browser. `build_html` carries a `.printbar` button that `@media print` hides, so
+the same HTML serves both routes and the button never reaches the paper.
 
 Three things differ on a server and are handled in code, not by hand:
 `pose.ensure_model()` downloads the gitignored `.task` file on first use (called from

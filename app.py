@@ -93,6 +93,7 @@ st.session_state.setdefault("running", False)
 st.session_state.setdefault("session", None)
 st.session_state.setdefault("critical_image", None)
 st.session_state.setdefault("report_pdf", None)
+st.session_state.setdefault("report_html", None)
 st.session_state.setdefault("source_label", "")
 st.session_state.setdefault("participant", None)
 # เก็บแหล่งข้อมูลไว้ตอนกดเริ่ม เพราะวิดเจ็ตเลือกไฟล์/โหมดจะถูกซ่อนระหว่างวิเคราะห์ (ดูจุดกดเริ่มด้านล่าง)
@@ -166,6 +167,7 @@ if not st.session_state.running:
         st.session_state.session = None
         st.session_state.critical_image = None
         st.session_state.report_pdf = None
+        st.session_state.report_html = None
         st.session_state.source_label = (
             uploaded_video.name if uploaded_video is not None else "กล้องเว็บแคม"
         )
@@ -618,7 +620,14 @@ if session is not None and session.records:
         height=320,
     )
 
-    csv_column, pdf_column = st.columns(2)
+    # ปุ่ม PDF โผล่เฉพาะเครื่องที่มี Chrome ให้เรียก บนเครื่องที่ไม่มี (เช่นตอนขึ้นเว็บ)
+    # ทางที่ได้รายงานตัวจริงคือโหลด HTML ไปเปิดแล้วสั่งพิมพ์เอง ซึ่งเบราว์เซอร์ของผู้ใช้
+    # จัดรูปอักษรไทยได้ถูกต้องอยู่แล้ว ไม่ต้องพึ่งอะไรฝั่งเซิร์ฟเวอร์
+    has_chrome = report.find_chrome() is not None
+    export_columns = st.columns(3 if has_chrome else 2)
+    csv_column, html_column = export_columns[0], export_columns[1]
+    pdf_column = export_columns[2] if has_chrome else None
+
     csv_column.download_button(
         "ดาวน์โหลดผลรายเฟรม (CSV)",
         # แปะคอลัมน์ผู้ทดสอบไว้ทุกแถว เพื่อให้นำ CSV ของหลายคนมาต่อกันเป็นตารางเดียวได้
@@ -629,24 +638,43 @@ if session is not None and session.records:
         width="stretch",
     )
 
+    # ประกอบ HTML ครั้งเดียวแล้วเก็บไว้ เพราะขั้นนี้ต้องวาดกราฟใหม่ทั้งสองรูป
+    # ถ้าปล่อยให้สร้างสดทุกรอบ การกดปุ่มอะไรก็ตามในหน้านี้จะหน่วงไปด้วย
+    if st.session_state.report_html is None:
+        st.session_state.report_html = report.build_html(
+            session,
+            st.session_state.source_label or "ไม่ระบุ",
+            st.session_state.critical_image,
+            participant=st.session_state.participant,
+        ).encode("utf-8")
+
+    html_column.download_button(
+        "ดาวน์โหลดรายงาน (HTML)",
+        data=st.session_state.report_html,
+        file_name="acl_report.html",
+        mime="text/html",
+        type="secondary" if has_chrome else "primary",
+        width="stretch",
+    )
+    if not has_chrome:
+        html_column.caption("เปิดไฟล์แล้วกด Ctrl+P / ⌘P → เลือก \"Save as PDF\"")
+
     # สร้าง PDF เมื่อผู้ใช้ขอเท่านั้น เพราะต้องเรียก Chrome ซึ่งใช้เวลาสองสามวินาที
     # แล้วเก็บผลไว้ใน session_state กันไม่ให้สร้างซ้ำทุกครั้งที่หน้าเว็บรีเฟรช
-    if st.session_state.report_pdf is None:
+    # ใช้ HTML ที่ประกอบไว้แล้วข้างบน จึงไม่ต้องวาดกราฟซ้ำอีกรอบ
+    if has_chrome and st.session_state.report_pdf is None:
         if pdf_column.button("สร้างรายงาน PDF", width="stretch"):
             with st.spinner("กำลังสร้างรายงาน..."):
                 try:
-                    st.session_state.report_pdf = report.build_pdf(
-                        session,
-                        st.session_state.source_label or "ไม่ระบุ",
-                        st.session_state.critical_image,
-                        participant=st.session_state.participant,
+                    st.session_state.report_pdf = report.render_pdf(
+                        st.session_state.report_html.decode("utf-8")
                     )
                 except report.ChromeNotFound as error:
                     st.error(str(error))
                 except subprocess.SubprocessError as error:
                     st.error(f"สร้างรายงานไม่สำเร็จ: {error}")
             st.rerun()
-    else:
+    elif has_chrome:
         pdf_column.download_button(
             "ดาวน์โหลดรายงาน (PDF)",
             data=st.session_state.report_pdf,

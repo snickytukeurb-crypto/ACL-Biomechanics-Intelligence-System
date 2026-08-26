@@ -223,7 +223,8 @@ def build_html(session, source_label: str, critical_image=None,
 <html lang="th"><head><meta charset="utf-8"><title>ACL Report</title>
 <style>
 @page {{ size: A4; margin: 14mm; }}
-body {{ font-family: "Thonburi", "Sarabun", "Helvetica Neue", sans-serif;
+body {{ font-family: "Thonburi", "Sarabun", "Leelawadee UI", "Tahoma",
+       "Noto Sans Thai", "Helvetica Neue", sans-serif;
        color: #0f172a; font-size: 12px; line-height: 1.55; }}
 h1 {{ font-size: 21px; margin: 0 0 2px; }}
 h2 {{ font-size: 14px; margin: 18px 0 7px; border-bottom: 1px solid #cbd5e1;
@@ -245,7 +246,17 @@ img.frame {{ width: 62%; margin-top: 10px; border-radius: 8px; }}
 img.chart {{ width: 100%; margin-top: 4px; }}
 footer {{ margin-top: 20px; color: #64748b; font-size: 10px;
           border-top: 1px solid #cbd5e1; padding-top: 7px; }}
+/* แถบปุ่มสั่งพิมพ์ สำหรับคนที่เปิดไฟล์ HTML นี้เอง เพราะเป็นทางเดียวที่ได้ PDF
+   เมื่อเครื่องที่รันแอปไม่มี Chrome ให้เรียก ซ่อนตอนพิมพ์ จึงไม่ติดไปในไฟล์ PDF */
+.printbar {{ position: fixed; top: 14px; right: 14px; }}
+.printbar button {{ font: inherit; padding: 9px 15px; border-radius: 9px;
+       border: 0; background: #0f172a; color: #f8fafc; cursor: pointer; }}
+@media print {{ .printbar {{ display: none; }} }}
+/* จอแคบ ๆ ปุ่มลอยจะทับหัวเรื่องที่ตัดบรรทัด จึงให้ไหลไปตามเนื้อหาแทน */
+@media (max-width: 700px) {{ .printbar {{ position: static; margin-bottom: 10px; }} }}
 </style></head><body>
+
+<div class="printbar"><button onclick="window.print()">พิมพ์ / บันทึกเป็น PDF</button></div>
 
 <h1>รายงานการวิเคราะห์ความเสี่ยงการบาดเจ็บเอ็นไขว้หน้าหัวเข่า (ACL)</h1>
 <div class="muted">แหล่งข้อมูล: {html.escape(source_label)} ·
