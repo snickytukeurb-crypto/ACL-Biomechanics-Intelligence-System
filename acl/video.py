@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import cv2
@@ -26,6 +25,10 @@ SIZE_CHOICES: dict[str, int | None] = {
     "ต้นฉบับ": None,
 }
 DEFAULT_SIZE = "960px"
+
+# ค่ามาตรฐานเมื่อผู้เรียกไม่ระบุ CRF เอง (เช่นชุดทดสอบ) ตัวเลขจริงที่ใช้งานจริงมาจาก
+# VIDEO_CRF ใน app.py ซึ่งตั้งต่ำกว่านี้เพื่อบีบไฟล์ให้เล็กลง
+DEFAULT_CRF = 23
 
 
 class EncoderNotAvailable(RuntimeError):
@@ -60,14 +63,17 @@ def bundled_ffmpeg() -> str | None:
 class FfmpegWriter:
     """เขียนวิดีโอ H.264 โดยส่งเฟรมดิบเข้า ffmpeg ทางไปป์
 
-    ใช้แทน cv2.VideoWriter บน Linux เพราะตัว OpenCV ที่แจกเป็น wheel สำหรับ Linux
-    ไม่มีตัวเข้ารหัส H.264 มาให้ (ติดเรื่องสิทธิบัตร) จะเขียน avc1 ไม่ได้เลย หรือได้ไฟล์
-    ที่เบราว์เซอร์เล่นไม่ออก ส่วนบน macOS ตัว OpenCV เรียก VideoToolbox ได้ จึงใช้ทางเดิม
+    เป็นทางหลักทุกแพลตฟอร์ม เพราะ cv2.VideoWriter คุมอัตราบีบอัด (CRF) ไม่ได้เลย
+    ไฟล์ที่ได้จึงใหญ่เกินจำเป็นเสมอ ต่างจากการส่งพารามิเตอร์ตรงเข้า libx264 แบบนี้
+    (เดิมใช้ทางนี้เฉพาะ Linux เพราะ OpenCV wheel ของ Linux ไม่มีตัวเข้ารหัส H.264 มาให้
+    ติดเรื่องสิทธิบัตร แต่เหตุผลเรื่องขนาดไฟล์ใช้ได้กับทุกแพลตฟอร์มเหมือนกัน)
 
     รับ-ส่งหน้าตาเหมือน cv2.VideoWriter เท่าที่หน้าเว็บใช้จริง คือ write() กับ release()
     """
 
-    def __init__(self, ffmpeg: str, path, fps: float, size: tuple[int, int]):
+    def __init__(
+        self, ffmpeg: str, path, fps: float, size: tuple[int, int], crf: int = DEFAULT_CRF
+    ):
         width, height = size
         self._process = subprocess.Popen(
             [
@@ -75,7 +81,8 @@ class FfmpegWriter:
                 "-f", "rawvideo", "-pix_fmt", "bgr24",
                 "-s", f"{width}x{height}", "-r", f"{max(fps, 1.0):.6f}",
                 "-i", "-",
-                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+                "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                 str(path),
             ],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -98,23 +105,22 @@ class FfmpegWriter:
         self._process.wait(timeout=120)
 
 
-def open_writer(path, fps: float, size: tuple[int, int]):
+def open_writer(path, fps: float, size: tuple[int, int], crf: int = DEFAULT_CRF):
     """เปิดไฟล์วิดีโอ H.264 สำหรับเขียนเฟรมที่วาดผลแล้ว
 
-    size คือ (กว้าง, สูง) ตามที่ OpenCV ต้องการ
+    size คือ (กว้าง, สูง) ตามที่ OpenCV ต้องการ ใช้ ffmpeg เป็นทางหลักเสมอเมื่อหาเจอ
+    (เจอแน่นอน เพราะ imageio-ffmpeg แถมไบนารีมาให้) เหลือ cv2.VideoWriter (VideoToolbox
+    บน macOS) ไว้เป็นทางสำรองสุดท้าย เผื่อเครื่องไหนหา ffmpeg ไม่เจอจริง ๆ
     """
-    if sys.platform.startswith("linux"):
-        ffmpeg = find_ffmpeg()
-        if ffmpeg is None:
-            raise EncoderNotAvailable(
-                "ไม่พบ ffmpeg ในเครื่อง จึงบันทึกวิดีโอผลลัพธ์ไม่ได้"
-            )
-        return FfmpegWriter(ffmpeg, path, fps, size)
+    ffmpeg = find_ffmpeg()
+    if ffmpeg is not None:
+        return FfmpegWriter(ffmpeg, path, fps, size, crf)
 
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"avc1"), fps, size)
     if not writer.isOpened():
         raise EncoderNotAvailable(
-            "เปิดตัวเข้ารหัส H.264 (avc1) ไม่ได้ จึงบันทึกวิดีโอผลลัพธ์ไม่ได้"
+            "ไม่พบ ffmpeg และเปิดตัวเข้ารหัส H.264 (avc1) ของ OpenCV ไม่ได้ "
+            "จึงบันทึกวิดีโอผลลัพธ์ไม่ได้"
         )
     return writer
 
