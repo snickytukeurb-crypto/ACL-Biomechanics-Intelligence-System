@@ -62,18 +62,24 @@ for an HTML download whenever `report.find_chrome()` is None — the viewer prin
 their own browser. `build_html` carries a `.printbar` button that `@media print` hides, so
 the same HTML serves both routes and the button never reaches the paper.
 
-Three things differ on a server and are handled in code, not by hand:
+Two things differ on a server and are handled in code, not by hand:
 `pose.ensure_model()` downloads the gitignored `.task` file on first use (called from
-`app.py` behind `st.cache_resource`); the webcam option is hidden when no camera exists
-(`WEBCAM_AVAILABLE`, override with `ACL_ENABLE_WEBCAM=1`); and `report.SERVER_FLAGS` adds
+`app.py` behind `st.cache_resource`); and `report.SERVER_FLAGS` adds
 `--no-sandbox --disable-dev-shm-usage` to Chromium on Linux only, so macOS behaviour is
-untouched.
+untouched. The camera mode itself no longer differs by host: it always captures through the
+*viewer's* browser via `streamlit-webrtc` (`WebRtcMode.SENDRECV`, see `LiveProcessor` in
+`app.py`), never a server-side device, so it works the same on a laptop and on Streamlit
+Community Cloud. It needs HTTPS (or `localhost`) and, on networks with strict NAT, a TURN
+server beyond the public STUN one configured — out of scope here, see `README.md`.
 
-`video.open_writer` also forks by platform: on Linux it returns `FfmpegWriter`, which pipes
-raw BGR frames into ffmpeg, because the Linux OpenCV wheels ship no H.264 encoder and
-`avc1` either fails outright or writes a file browsers refuse to play. macOS keeps the
-`cv2.VideoWriter` path (VideoToolbox). `find_ffmpeg()` falls back to the `imageio-ffmpeg`
-binary last, so local runs still get Homebrew's ffmpeg — which matters because
+`video.open_writer` uses `FfmpegWriter` on every platform now, piping raw BGR frames into
+`libx264` with a fixed CRF (`VIDEO_CRF` in `app.py`, currently 28) and
+`-movflags +faststart`. `cv2.VideoWriter` (`avc1`) is a last-resort fallback only, used
+solely when `find_ffmpeg()` finds nothing — which in practice never happens, because
+`imageio-ffmpeg` ships its own binary. The switch away from `cv2.VideoWriter` as the
+macOS-primary path was deliberate: it cannot control compression at all, so files came out
+several times larger than necessary. `find_ffmpeg()` still prefers a system ffmpeg over the
+bundled one when both exist, so local runs get Homebrew's ffmpeg — which matters because
 `tests/test_video.py` derives `ffprobe` from that path and the bundled binary has no
 `ffprobe` beside it.
 
@@ -93,14 +99,26 @@ binary last, so local runs still get Homebrew's ffmpeg — which matters because
 Data flow per frame: `pose.world_leg` → `Session.update` → `LegTracker` (smooth θ →
 differentiate to ω → smooth ω → differentiate to α) → `risk.risk_index` → `FrameRecord`.
 
-Two design points that are easy to break:
+Design points that are easy to break:
 
 - **`Session` is mutated in place and stored in `st.session_state` *before* `analyse()`
   runs.** Pressing "หยุด" makes Streamlit raise a rerun exception inside the frame loop, so
   anything after the `analyse()` call never executes. Moving that assignment back below the
-  call silently discards every webcam result.
+  call silently discards every upload result. The browser-camera flow has the same trap in a
+  different shape: `ctx.video_processor` (from `webrtc_streamer`) is only non-`None` while
+  the stream is playing, so `app.py` stashes it in `st.session_state.live_processor` on every
+  rerun and only reads `.session`/`.critical_image`/`.video_path` off it once the value goes
+  back to `None` (i.e. just after STOP). Skipping that stash silently discards the result the
+  same way.
 - **`Session.update` accumulates elapsed time from `dt`**, rather than deriving it from the
-  frame index, so webcam sessions (variable frame rate) get a truthful time axis.
+  frame index, so live sessions (variable frame rate — camera or processing load) get a
+  truthful time axis.
+- **`LiveProcessor` (the `streamlit-webrtc` video processor) runs on its own worker thread**,
+  separate from the Streamlit script thread — `__init__`, `recv()` and `on_ended()` must
+  never call `st.*`. Anything the page needs to show live is drawn onto the frame itself
+  (same `draw_risk_banner`/`draw_metric_strip` calls the upload path uses, via the shared
+  `process_frame` helper); only the final summary is handed back to the main script, and only
+  after the stream has stopped.
 
 ## Rules specific to this project
 
